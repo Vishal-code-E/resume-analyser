@@ -89,3 +89,65 @@ class AnalysisResponse(BaseModel):
     score_breakdown:     ScoreBreakdown  
 
 
+# ── Batch ──────────────────────────────────────────────────
+
+class BatchAnalyseRequest(BaseModel):
+    resumes: list[str] = Field(..., min_length=1, max_length=10)
+    job_description: str = Field(..., min_length=50, max_length=8000)
+
+    @field_validator("resumes")
+    @classmethod
+    def validate_resumes(cls, v):
+        for i, resume in enumerate(v):
+            if len(resume.strip()) < 50:
+                raise ValueError(f"Resume at index {i} is too short")
+        return v
+
+
+class RankedCandidate(BaseModel):
+    rank:             int
+    candidate_name:   str
+    overall_score:    int
+    recommendation:   Literal["advance", "hold", "reject"]
+    confidence:       Literal["low", "medium", "high"]
+    strengths:        list[str]
+    matching_skills:  list[str]
+    gaps:             list[Gap]
+    jd_match_breakdown: dict[str, int]
+    interview_questions: list[InterviewQuestion]
+    score_breakdown:  ScoreBreakdown
+
+
+class BatchAnalysisResponse(BaseModel):
+    total:      int
+    advance:    int
+    hold:       int
+    reject:     int
+    candidates: list[RankedCandidate]
+
+
+# ── Results history ────────────────────────────────────────
+
+class ScreeningResultResponse(BaseModel):
+    id:                  int
+    candidate_name:      str
+    overall_score:       int
+    recommendation:      Literal["advance", "hold", "reject"]
+    confidence:          Literal["low", "medium", "high"]
+    rule_score:          int
+    llm_score:           int
+    matching_skills:     list[str]
+    gaps:                list[Gap]
+    strengths:           list[str]
+    jd_match_breakdown:  dict[str, int]
+    interview_questions: list[InterviewQuestion]
+    score_breakdown:     ScoreBreakdown
+    resume_snippet:      str
+    created_at:          str
+
+    model_config = {"from_attributes": True}
+
+
+class ResultsResponse(BaseModel):
+    total:   int
+    results: list[ScreeningResultResponse]
