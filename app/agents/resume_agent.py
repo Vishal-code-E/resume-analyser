@@ -1,8 +1,10 @@
 import os
 import json
 from openai import AsyncOpenAI
+from dotenv import load_dotenv
 from app.models.schemas import CandidateProfile
 
+load_dotenv()
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 SYSTEM_PROMPT = """You are a resume parser. Extract structured information from resumes.
