@@ -2,7 +2,7 @@
 
 A production-grade AI pipeline that analyses candidate-JD fit using a 4-agent architecture built on FastAPI and OpenAI.
 
-Recognised in **IIT Bombay SINE Top 25** — built as part of AVATAQ's agentic tooling stack.
+
 
 ---
 
