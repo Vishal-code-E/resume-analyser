@@ -1,6 +1,9 @@
 import os
 import asyncio
+import logging
+import logging.config
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
 from app.models.schemas import AnalyseRequest, AnalysisResponse
@@ -11,13 +14,56 @@ from app.agents.interview_agent import generate_interview_questions
 
 load_dotenv()
 
+# ── Logging config ─────────────────────────────────────────
+logging.config.dictConfig({
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "default": {
+            "format": "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+            "datefmt": "%H:%M:%S"
+        }
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "default"
+        }
+    },
+    "root": {
+        "level": "INFO",
+        "handlers": ["console"]
+    }
+})
+
+logger = logging.getLogger(__name__)
+
+# ── App ────────────────────────────────────────────────────
 app = FastAPI(
     title="Resume Analyser API",
     description="4-agent pipeline for candidate-JD fit analysis",
     version="1.0.0"
 )
 
+# ── CORS ───────────────────────────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],        # tighten this in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+# ── Helpers ────────────────────────────────────────────────
+def derive_recommendation(score: int) -> str:
+    if score >= 70:
+        return "advance"
+    if score >= 45:
+        return "hold"
+    return "reject"
+
+
+# ── Routes ─────────────────────────────────────────────────
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -25,38 +71,58 @@ async def health():
 
 @app.post("/analyse", response_model=AnalysisResponse)
 async def analyse(request: AnalyseRequest):
+    logger.info("POST /analyse — request received")
 
-    # ── Input validation ───────────────────────────────────
-    if not request.resume_text.strip():
-        raise HTTPException(status_code=422, detail="resume_text cannot be empty")
-    if not request.job_description.strip():
-        raise HTTPException(status_code=422, detail="job_description cannot be empty")
-
-    # ── Agent 1 + 2 in parallel ────────────────────────────
+    # ── Agent 1 + 2 parallel with timeout ─────────────────
     try:
-        candidate_profile, job_profile = await asyncio.gather(
-            extract_candidate_profile(request.resume_text),
-            extract_job_profile(request.job_description)
+        candidate_profile, job_profile = await asyncio.wait_for(
+            asyncio.gather(
+                extract_candidate_profile(request.resume_text),
+                extract_job_profile(request.job_description)
+            ),
+            timeout=30.0
         )
+        logger.info(f"Extraction complete — candidate={candidate_profile.name}")
+    except asyncio.TimeoutError:
+        logger.error("Extraction agents timed out")
+        raise HTTPException(status_code=504, detail="Extraction timed out — try again")
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-    # ── Agent 3 — scoring ──────────────────────────────────
+    # ── Agent 3 — scoring with timeout ────────────────────
     try:
-        match_data = await score_candidate(candidate_profile, job_profile)
+        match_data = await asyncio.wait_for(
+            score_candidate(candidate_profile, job_profile),
+            timeout=30.0
+        )
+        logger.info(f"Scoring complete — raw_score={match_data.get('overall_score')}")
+    except asyncio.TimeoutError:
+        logger.error("Match Agent timed out")
+        raise HTTPException(status_code=504, detail="Scoring timed out — try again")
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-    # ── Agent 4 — interview questions ──────────────────────
+    # ── Programmatic recommendation — overrides LLM ───────
+    final_recommendation = derive_recommendation(match_data["overall_score"])
+    logger.info(f"Recommendation derived — {final_recommendation}")
+
+    # ── Agent 4 — interview questions with timeout ─────────
     try:
-        questions = await generate_interview_questions(
-            gaps=match_data["gaps"],
-            candidate_name=match_data["candidate_name"]
+        questions = await asyncio.wait_for(
+            generate_interview_questions(
+                gaps=match_data["gaps"],
+                candidate_name=match_data["candidate_name"]
+            ),
+            timeout=30.0
         )
+        logger.info(f"Interview Agent complete — {len(questions)} questions")
+    except asyncio.TimeoutError:
+        logger.error("Interview Agent timed out")
+        raise HTTPException(status_code=504, detail="Interview generation timed out — try again")
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     except RuntimeError as e:
@@ -68,13 +134,16 @@ async def analyse(request: AnalyseRequest):
             candidate_name=match_data["candidate_name"],
             overall_score=match_data["overall_score"],
             confidence=match_data["confidence"],
-            recommendation=match_data["recommendation"],
+            recommendation=final_recommendation,
             matching_skills=match_data["matching_skills"],
+            strengths=match_data.get("strengths", []), 
             gaps=match_data["gaps"],
             jd_match_breakdown=match_data["jd_match_breakdown"],
             interview_questions=questions
         )
     except Exception as e:
+        logger.error(f"Response assembly failed — {e}")
         raise HTTPException(status_code=500, detail=f"Response assembly failed: {e}")
 
+    logger.info(f"POST /analyse — complete | score={result.overall_score} | rec={result.recommendation}")
     return result

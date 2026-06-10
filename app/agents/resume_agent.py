@@ -1,11 +1,10 @@
-import os
 import json
-from openai import AsyncOpenAI
-from dotenv import load_dotenv
+import logging
+import openai
+from app.core.client import openai_client
 from app.models.schemas import CandidateProfile
 
-load_dotenv()
-client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are a resume parser. Extract structured information from resumes.
 You must respond ONLY with a valid JSON object. No markdown, no explanation, no extra text.
@@ -32,8 +31,9 @@ Resume:
 """
 
 async def extract_candidate_profile(resume_text: str) -> CandidateProfile:
+    logger.info("Resume Agent: starting extraction")
     try:
-        response = await client.chat.completions.create(
+        response = await openai_client.chat.completions.create(
             model="gpt-4o",
             temperature=0,
             response_format={"type": "json_object"},
@@ -42,12 +42,26 @@ async def extract_candidate_profile(resume_text: str) -> CandidateProfile:
                 {"role": "user", "content": build_prompt(resume_text)}
             ]
         )
-
         raw = response.choices[0].message.content.strip()
+        logger.info("Resume Agent: extraction complete")
         data = json.loads(raw)
         return CandidateProfile(**data)
 
     except json.JSONDecodeError as e:
+        logger.error(f"Resume Agent: JSON parse failed — {e}")
         raise ValueError(f"Resume Agent failed to parse JSON: {e}")
+    except openai.AuthenticationError:
+        logger.error("Resume Agent: invalid OpenAI API key")
+        raise RuntimeError("Invalid OpenAI API key")
+    except openai.RateLimitError:
+        logger.error("Resume Agent: rate limit hit")
+        raise RuntimeError("OpenAI rate limit reached — try again shortly")
+    except openai.APITimeoutError:
+        logger.error("Resume Agent: request timed out")
+        raise RuntimeError("OpenAI request timed out")
+    except openai.APIError as e:
+        logger.error(f"Resume Agent: OpenAI API error — {e}")
+        raise RuntimeError(f"OpenAI API error: {e}")
     except Exception as e:
+        logger.error(f"Resume Agent: unexpected error — {e}")
         raise RuntimeError(f"Resume Agent error: {e}")

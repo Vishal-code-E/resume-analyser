@@ -1,11 +1,10 @@
-import os
 import json
-from openai import AsyncOpenAI
-from dotenv import load_dotenv
+import logging
+import openai
+from app.core.client import openai_client
 from app.models.schemas import JobProfile
 
-load_dotenv()
-client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are a job description parser. Extract structured hiring requirements from JDs.
 You must respond ONLY with a valid JSON object. No markdown, no explanation, no extra text.
@@ -36,8 +35,9 @@ Job Description:
 """
 
 async def extract_job_profile(jd_text: str) -> JobProfile:
+    logger.info("JD Agent: starting extraction")
     try:
-        response = await client.chat.completions.create(
+        response = await openai_client.chat.completions.create(
             model="gpt-4o",
             temperature=0,
             response_format={"type": "json_object"},
@@ -46,12 +46,26 @@ async def extract_job_profile(jd_text: str) -> JobProfile:
                 {"role": "user", "content": build_prompt(jd_text)}
             ]
         )
-
         raw = response.choices[0].message.content.strip()
+        logger.info("JD Agent: extraction complete")
         data = json.loads(raw)
         return JobProfile(**data)
 
     except json.JSONDecodeError as e:
+        logger.error(f"JD Agent: JSON parse failed — {e}")
         raise ValueError(f"JD Agent failed to parse JSON: {e}")
+    except openai.AuthenticationError:
+        logger.error("JD Agent: invalid OpenAI API key")
+        raise RuntimeError("Invalid OpenAI API key")
+    except openai.RateLimitError:
+        logger.error("JD Agent: rate limit hit")
+        raise RuntimeError("OpenAI rate limit reached — try again shortly")
+    except openai.APITimeoutError:
+        logger.error("JD Agent: request timed out")
+        raise RuntimeError("OpenAI request timed out")
+    except openai.APIError as e:
+        logger.error(f"JD Agent: OpenAI API error — {e}")
+        raise RuntimeError(f"OpenAI API error: {e}")
     except Exception as e:
+        logger.error(f"JD Agent: unexpected error — {e}")
         raise RuntimeError(f"JD Agent error: {e}")

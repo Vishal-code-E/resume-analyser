@@ -1,11 +1,10 @@
-import os
 import json
-from openai import AsyncOpenAI
-from dotenv import load_dotenv
-from app.models.schemas import CandidateProfile, JobProfile, Gap, AnalysisResponse
+import logging
+import openai
+from app.core.client import openai_client
+from app.models.schemas import CandidateProfile, JobProfile, Gap
 
-load_dotenv()
-client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are a senior technical recruiter scoring candidate fit against a job description.
 You must respond ONLY with a valid JSON object. No markdown, no explanation, no extra text.
@@ -21,11 +20,6 @@ Confidence rubric:
 - medium: Enough signal but some ambiguity
 - high:   Clear evidence across most requirement areas
 
-Recommendation rubric:
-- advance: overall_score >= 70
-- hold:    overall_score 45-69
-- reject:  overall_score < 45
-
 Gap severity:
 - must-have: skill is in required_skills of the JD and candidate lacks it
 - preferred: skill is in preferred_skills of the JD and candidate lacks it
@@ -34,6 +28,15 @@ For jd_match_breakdown:
 - Use the exact domain names from the job profile domains list
 - Score each domain 0-100 using the same rubric as overall_score
 - Only score domains that exist in the JD
+
+
+Critical matching rules:
+- If a requirement states "X or Y" and the candidate has either X or Y, it is NOT a gap
+- Only flag a gap if the candidate has NEITHER option in an OR requirement
+- Match skills semantically — "REST APIs" matches "REST API design"
+- Seniority mismatch is a soft signal, not a hard gap
+
+Scoring rubric for overall_score:
 """
 
 def build_prompt(candidate: CandidateProfile, job: JobProfile) -> str:
@@ -43,7 +46,7 @@ def build_prompt(candidate: CandidateProfile, job: JobProfile) -> str:
   "candidate_name": "from candidate profile",
   "overall_score": <0-100 integer>,
   "confidence": "low | medium | high",
-  "recommendation": "advance | hold | reject",
+  "strengths": ["key strengths to highlight in recommendation"],
   "matching_skills": ["skills candidate has that appear in required or preferred lists"],
   "gaps": [
     {{"skill": "missing skill name", "severity": "must-have | preferred"}}
@@ -64,8 +67,9 @@ async def score_candidate(
     candidate: CandidateProfile,
     job: JobProfile
 ) -> dict:
+    logger.info(f"Match Agent: scoring {candidate.name}")
     try:
-        response = await client.chat.completions.create(
+        response = await openai_client.chat.completions.create(
             model="gpt-4o",
             temperature=0,
             response_format={"type": "json_object"},
@@ -74,16 +78,27 @@ async def score_candidate(
                 {"role": "user", "content": build_prompt(candidate, job)}
             ]
         )
-
         raw = response.choices[0].message.content.strip()
         data = json.loads(raw)
-
-        # Validate gaps into typed Gap objects
         data["gaps"] = [Gap(**g) for g in data.get("gaps", [])]
-
+        logger.info(f"Match Agent: scoring complete — score={data.get('overall_score')}")
         return data
 
     except json.JSONDecodeError as e:
+        logger.error(f"Match Agent: JSON parse failed — {e}")
         raise ValueError(f"Match Agent failed to parse JSON: {e}")
+    except openai.AuthenticationError:
+        logger.error("Match Agent: invalid OpenAI API key")
+        raise RuntimeError("Invalid OpenAI API key")
+    except openai.RateLimitError:
+        logger.error("Match Agent: rate limit hit")
+        raise RuntimeError("OpenAI rate limit reached — try again shortly")
+    except openai.APITimeoutError:
+        logger.error("Match Agent: request timed out")
+        raise RuntimeError("OpenAI request timed out")
+    except openai.APIError as e:
+        logger.error(f"Match Agent: OpenAI API error — {e}")
+        raise RuntimeError(f"OpenAI API error: {e}")
     except Exception as e:
+        logger.error(f"Match Agent: unexpected error — {e}")
         raise RuntimeError(f"Match Agent error: {e}")
