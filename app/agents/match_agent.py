@@ -65,7 +65,8 @@ Job Profile:
 
 async def score_candidate(
     candidate: CandidateProfile,
-    job: JobProfile
+    job: JobProfile,        
+    rule_data: dict  
 ) -> dict:
     logger.info(f"Match Agent: scoring {candidate.name}")
     try:

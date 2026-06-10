@@ -6,11 +6,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
-from app.models.schemas import AnalyseRequest, AnalysisResponse
+from app.models.schemas import AnalyseRequest, AnalysisResponse, ScoreBreakdown
 from app.agents.resume_agent import extract_candidate_profile
 from app.agents.jd_agent import extract_job_profile
 from app.agents.match_agent import score_candidate
 from app.agents.interview_agent import generate_interview_questions
+from app.services.rule_scorer import compute_rule_score
+from app.services.aggregator import aggregate_scores, derive_recommendation
 
 load_dotenv()
 
@@ -48,19 +50,11 @@ app = FastAPI(
 # ── CORS ───────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],        # tighten this in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ── Helpers ────────────────────────────────────────────────
-def derive_recommendation(score: int) -> str:
-    if score >= 70:
-        return "advance"
-    if score >= 45:
-        return "hold"
-    return "reject"
 
 
 # ── Routes ─────────────────────────────────────────────────
@@ -73,7 +67,7 @@ async def health():
 async def analyse(request: AnalyseRequest):
     logger.info("POST /analyse — request received")
 
-    # ── Agent 1 + 2 parallel with timeout ─────────────────
+    # ── Agent 1 + 2 parallel ──────────────────────────────
     try:
         candidate_profile, job_profile = await asyncio.wait_for(
             asyncio.gather(
@@ -91,13 +85,22 @@ async def analyse(request: AnalyseRequest):
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-    # ── Agent 3 — scoring with timeout ────────────────────
+    # ── Rule scorer — pure Python, instant ────────────────
+    rule_data = compute_rule_score(candidate_profile, job_profile)
+    logger.info(
+        f"Rule scorer complete — "
+        f"score={rule_data['rule_score']} "
+        f"required={rule_data['required_coverage']}% "
+        f"seniority={rule_data['seniority_alignment']}%"
+    )
+
+    # ── Agent 3 — LLM depth scoring ───────────────────────
     try:
         match_data = await asyncio.wait_for(
-            score_candidate(candidate_profile, job_profile),
+            score_candidate(candidate_profile, job_profile, rule_data),
             timeout=30.0
         )
-        logger.info(f"Scoring complete — raw_score={match_data.get('overall_score')}")
+        logger.info(f"Match Agent complete — llm_score={match_data.get('overall_score')}")
     except asyncio.TimeoutError:
         logger.error("Match Agent timed out")
         raise HTTPException(status_code=504, detail="Scoring timed out — try again")
@@ -106,11 +109,19 @@ async def analyse(request: AnalyseRequest):
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-    # ── Programmatic recommendation — overrides LLM ───────
-    final_recommendation = derive_recommendation(match_data["overall_score"])
-    logger.info(f"Recommendation derived — {final_recommendation}")
+    # ── Aggregate rule + LLM scores ───────────────────────
+    score_data = aggregate_scores(
+        rule_score=rule_data["rule_score"],
+        llm_score=match_data["overall_score"]
+    )
+    final_recommendation = derive_recommendation(score_data["final_score"])
+    logger.info(
+        f"Aggregator complete — "
+        f"final={score_data['final_score']} "
+        f"rec={final_recommendation}"
+    )
 
-    # ── Agent 4 — interview questions with timeout ─────────
+    # ── Agent 4 — interview questions ─────────────────────
     try:
         questions = await asyncio.wait_for(
             generate_interview_questions(
@@ -132,18 +143,34 @@ async def analyse(request: AnalyseRequest):
     try:
         result = AnalysisResponse(
             candidate_name=match_data["candidate_name"],
-            overall_score=match_data["overall_score"],
+            overall_score=score_data["final_score"],
             confidence=match_data["confidence"],
             recommendation=final_recommendation,
+            strengths=match_data.get("strengths", []),
             matching_skills=match_data["matching_skills"],
-            strengths=match_data.get("strengths", []), 
             gaps=match_data["gaps"],
             jd_match_breakdown=match_data["jd_match_breakdown"],
-            interview_questions=questions
+            interview_questions=questions,
+            score_breakdown=ScoreBreakdown(
+                final_score=score_data["final_score"],
+                rule_score=score_data["rule_score"],
+                llm_score=score_data["llm_score"],
+                rule_weight=score_data["rule_weight"],
+                llm_weight=score_data["llm_weight"],
+                required_coverage=rule_data["required_coverage"],
+                preferred_coverage=rule_data["preferred_coverage"],
+                seniority_alignment=rule_data["seniority_alignment"],
+            )
         )
     except Exception as e:
         logger.error(f"Response assembly failed — {e}")
         raise HTTPException(status_code=500, detail=f"Response assembly failed: {e}")
 
-    logger.info(f"POST /analyse — complete | score={result.overall_score} | rec={result.recommendation}")
+    logger.info(
+        f"POST /analyse — complete | "
+        f"final={result.overall_score} | "
+        f"rule={score_data['rule_score']} | "
+        f"llm={score_data['llm_score']} | "
+        f"rec={result.recommendation}"
+    )
     return result

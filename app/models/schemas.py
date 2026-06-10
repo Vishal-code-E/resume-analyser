@@ -50,6 +50,19 @@ class AnalyseRequest(BaseModel):
         return v
 
 
+#--- Score Breakdown --------------------------------------
+
+class ScoreBreakdown(BaseModel):
+    final_score:          int
+    rule_score:           int
+    llm_score:            int
+    rule_weight:          float
+    llm_weight:           float
+    required_coverage:    int    # % of required skills matched
+    preferred_coverage:   int    # % of preferred skills matched
+    seniority_alignment:  int    # % seniority match score
+
+
 # ── Response ───────────────────────────────────────────────
 
 class Gap(BaseModel):
@@ -73,3 +86,6 @@ class AnalysisResponse(BaseModel):
     gaps: list[Gap]
     jd_match_breakdown: dict[str, int]
     interview_questions: list[InterviewQuestion]
+    score_breakdown:     ScoreBreakdown  
+
+

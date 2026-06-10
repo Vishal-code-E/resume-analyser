@@ -30,6 +30,13 @@ def build_prompt(jd_text: str) -> str:
   "seniority_expected": "junior | mid | senior"
 }}
 
+
+Critical extraction rules:
+- If a requirement lists alternatives (e.g. "Django or FastAPI", "Postgres / MySQL"),
+  preserve it as a SINGLE entry exactly as written e.g. "Django or FastAPI"
+  Do NOT split OR conditions into separate skills
+- Only split into separate entries if they are clearly independent requirements
+
 Job Description:
 {jd_text}
 """
